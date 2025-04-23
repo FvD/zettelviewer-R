@@ -36,9 +36,10 @@ render_markdown_folder <- function(folder_path, port = 8000) {
   # Create a temporary directory for intermediate files
   temp_dir <- tempdir()
   
-  # Keep track of filenames without path and extension
+  # Keep track of filenames and titles
   file_basenames <- c()
   file_orignames <- c()
+  file_titles <- c()
   
   # Render each file
   for (file in md_files) {
@@ -46,7 +47,11 @@ render_markdown_folder <- function(folder_path, port = 8000) {
     file_orignames <- c(file_orignames, file_basename)
     file_basenames <- c(file_basenames, gsub("\\.(md|Rmd|markdown)$", "", file_basename))
     
-    message(paste("Rendering:", file_basename))
+    # Extract title from the markdown file
+    title <- extract_title_from_markdown(file)
+    file_titles <- c(file_titles, title)
+    
+    message(paste("Rendering:", file_basename, "(", title, ")"))
     
     # Generate output filename in the temporary directory
     output_file <- file.path(temp_dir, gsub("\\.(md|Rmd|markdown)$", ".html", file_basename))
@@ -78,31 +83,38 @@ render_markdown_folder <- function(folder_path, port = 8000) {
   
   message("Rendering complete!")
   
-  # Create an index.html with links to all documents
+  # Create an index.html with links to all documents and their titles
   index_html <- paste0(
     "<!DOCTYPE html>\n<html>\n<head>\n",
-    "<title>Markdown Viewer</title>\n",
+    "<title>Markdown Document Index</title>\n",
     "<style>",
     "body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }",
-    "h1 { color: #333; }",
-    "ul { list-style-type: none; padding: 0; }",
-    "li { margin: 10px 0; padding: 8px; background-color: #f0f0f0; border-radius: 4px; }",
+    "h1 { color: #333; margin-bottom: 20px; }",
+    "table { width: 100%; border-collapse: collapse; }",
+    "th { background-color: #f2f2f2; text-align: left; padding: 12px; }",
+    "td { padding: 10px; border-bottom: 1px solid #ddd; }",
+    "tr:hover { background-color: #f5f5f5; }",
     "a { color: #0066cc; text-decoration: none; }",
     "a:hover { text-decoration: underline; }",
+    ".filename { font-family: monospace; color: #666; }",
     "</style>\n",
     "</head>\n<body>\n",
-    "<h1>Markdown Files</h1>\n",
-    "<ul>\n"
+    "<h1>Markdown Document Index</h1>\n",
+    "<table>\n",
+    "<tr><th>Document Title</th><th>Filename</th></tr>\n"
   )
   
   for (i in seq_along(file_basenames)) {
     index_html <- paste0(
       index_html,
-      '<li><a href="/', file_basenames[i], '">', file_orignames[i], '</a></li>\n'
+      '<tr>',
+      '<td><a href="/', file_basenames[i], '">', htmlEscape(file_titles[i]), '</a></td>',
+      '<td class="filename">', htmlEscape(file_orignames[i]), '</td>',
+      '</tr>\n'
     )
   }
   
-  index_html <- paste0(index_html, "</ul>\n</body>\n</html>")
+  index_html <- paste0(index_html, "</table>\n</body>\n</html>")
   html_content[["index.html"]] <- index_html
   
   # Set up the server
@@ -114,8 +126,16 @@ render_markdown_folder <- function(folder_path, port = 8000) {
     call = function(req) {
       # Parse the request path
       path <- req$PATH_INFO
-      if (path == "/") {
-        path <- "/index"
+      if (path == "/" || path == "") {
+        # Serve index page
+        return(list(
+          status = 200L,
+          headers = list(
+            'Content-Type' = 'text/html',
+            'Content-Length' = nchar(html_content[["index.html"]], type = "bytes")
+          ),
+          body = html_content[["index.html"]]
+        ))
       }
       
       # Remove leading slash
@@ -135,16 +155,11 @@ render_markdown_folder <- function(folder_path, port = 8000) {
       
       # If not found, try with different extensions
       if (is.null(content)) {
-        # Check if it's a request for index.html
-        if (path == "index") {
-          content <- html_content[["index.html"]]
-        } else {
-          # Try matching with original extension
-          for (name in names(html_content)) {
-            if (startsWith(name, paste0(path, "."))) {
-              content <- html_content[[name]]
-              break
-            }
+        # Try matching with original extension
+        for (name in names(html_content)) {
+          if (startsWith(name, paste0(path, "."))) {
+            content <- html_content[[name]]
+            break
           }
         }
       }
@@ -186,16 +201,6 @@ render_markdown_folder <- function(folder_path, port = 8000) {
     }
   )
   
-  # HTML escape function
-  htmlEscape <- function(x) {
-    x <- gsub("&", "&amp;", x)
-    x <- gsub("<", "&lt;", x)
-    x <- gsub(">", "&gt;", x)
-    x <- gsub("'", "&#39;", x)
-    x <- gsub("\"", "&quot;", x)
-    return(x)
-  }
-  
   # Start the server
   server <- httpuv::startServer("127.0.0.1", port, app)
   
@@ -207,6 +212,70 @@ render_markdown_folder <- function(folder_path, port = 8000) {
   
   # Return the HTML content (invisible) - will not be reached in normal operation
   invisible(html_content)
+}
+
+# Helper function to extract title from markdown file
+extract_title_from_markdown <- function(file_path) {
+  # Try to read the file
+  tryCatch({
+    lines <- readLines(file_path, n = 20)  # Read first 20 lines to find title
+    
+    # Try to find title from YAML front matter
+    yaml_start <- which(lines == "---")[1]
+    if (!is.na(yaml_start)) {
+      yaml_end <- which(lines == "---")[2]
+      if (!is.na(yaml_end) && yaml_end > yaml_start) {
+        yaml_block <- lines[(yaml_start+1):(yaml_end-1)]
+        title_line <- grep("^title:", yaml_block, value = TRUE)
+        if (length(title_line) > 0) {
+          title <- sub("^title:\\s*", "", title_line[1])
+          # Remove quotes if present
+          title <- gsub("^[\"']|[\"']$", "", title)
+          if (nchar(title) > 0) {
+            return(title)
+          }
+        }
+      }
+    }
+    
+    # Try to find the first heading if YAML title not found
+    for (line in lines) {
+      # Match # heading or === or --- style headings
+      if (grepl("^\\s*# ", line)) {
+        return(trimws(sub("^\\s*#\\s*", "", line)))
+      }
+    }
+    
+    # Check for setext style headings (=== or ---)
+    for (i in 1:(length(lines)-1)) {
+      if (grepl("^=+\\s*$", lines[i+1]) && nchar(trimws(lines[i])) > 0) {
+        return(trimws(lines[i]))
+      }
+      if (grepl("^-+\\s*$", lines[i+1]) && nchar(trimws(lines[i])) > 0) {
+        return(trimws(lines[i]))
+      }
+    }
+    
+    # If no title found, use filename
+    return(basename(file_path))
+    
+  }, error = function(e) {
+    # If any error occurs, return filename
+    return(basename(file_path))
+  })
+}
+
+# HTML escape function
+htmlEscape <- function(x) {
+  if (is.null(x) || length(x) == 0 || is.na(x) || nchar(x) == 0) {
+    return("Untitled")
+  }
+  x <- gsub("&", "&amp;", x)
+  x <- gsub("<", "&lt;", x)
+  x <- gsub(">", "&gt;", x)
+  x <- gsub("'", "&#39;", x)
+  x <- gsub("\"", "&quot;", x)
+  return(x)
 }
 
 # Handle command line arguments
